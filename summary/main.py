@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 
 from api.routes import router as routes_router
 from config.settings import settings
-from logging_config import setup_logging
+from utils.logging import setup_logging
 
 # Настраиваем логирование на основе переменной окружения
 setup_logging(settings.log_level)

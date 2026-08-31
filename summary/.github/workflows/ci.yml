@@ -107,6 +107,6 @@ jobs:
           from llm.client import generate
           from llm.prompts import build_summarize_prompt
           from config.settings import settings
-          from logging_config import setup_logging
+          from utils.logging import setup_logging
           print('All imports OK')
           "

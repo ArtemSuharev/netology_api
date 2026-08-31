@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from config.settings import settings
 from llm.client import generate
 from llm.prompts import LENGTH_INSTRUCTIONS, build_summarize_prompt
-from logging_config import log_exception
+from utils.logging import log_exception
 from services.fallback import fallback_summarize
 from services.postprocessing import postprocess
 

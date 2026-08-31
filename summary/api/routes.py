@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from config.settings import settings
-from logging_config import log_exception
+from utils.logging import log_exception
 from services.pipeline import (
     InvalidLengthError,
     SummaryError,
