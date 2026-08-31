@@ -1,97 +1,114 @@
+"""Клиент для вызова LLM (совместимый с OpenAI API).
+
+Слой llm: формирование запросов, таймауты, обработка сетевых ошибок.
+"""
+
+from __future__ import annotations
+
 import logging
 from typing import Any
 
-from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
-from tenacity import (
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
+from openai import AsyncOpenAI, APIConnectionError, APITimeoutError
 
 from config.settings import settings
-
-logger = logging.getLogger("llm.client")
-
-_client = None
-
-DEFAULT_RETRY_COUNT = 3
-DEFAULT_RETRY_BACKOFF = 1.0
-
-
-def get_client() -> AsyncOpenAI:
-    global _client
-    if _client is None:
-        _client = AsyncOpenAI(
-            api_key=settings.llm_api_key or None,
-            base_url=settings.llm_base_url,
-        )
-    return _client
-
-
-# Retry on transient errors: connection timeouts, 5xx server errors
-TRANSIENT_ERRORS = (APIConnectionError, APITimeoutError, APIStatusError)
-
-
-@retry(
-    stop=stop_after_attempt(DEFAULT_RETRY_COUNT),
-    wait=wait_exponential(multiplier=DEFAULT_RETRY_BACKOFF, min=2, max=10),
-    retry=retry_if_exception_type(TRANSIENT_ERRORS),
-    reraise=True,
+from exceptions import (
+    LLMConnectionError,
+    LLMResponseError,
+    LLMTimeoutError,
 )
-async def generate(prompt: str, **kwargs: Any) -> str:
-    """
-    Вызов LLM с автоматическим retry при transient-ошибках.
 
-    Логгирует:
-    - Начало вызова (модель, длина промпта)
-    - Успешный ответ (длина ответа)
-    - Ошибки retry (номер попытки, тип ошибки)
+logger = logging.getLogger(__name__)
 
-    Перехватывает:
-    - APIConnectionError  — упал таймаут / разорвано соединение
-    - APITimeoutError     — сервер не уложился в таймаут
-    - APIStatusError      — сервер вернул 5xx
 
-    При исчерпании retry — выбрасывает последнюю ошибку дальше,
-    где она будет обработана слоем бизнес-логики / API.
-    """
-    client = get_client()
+class LLMClient:
+    """Обёртка над асинхронным OpenAI-клиентом с таймаутами и обработкой ошибок."""
 
-    logger.debug(
-        "LLM request started",
-        extra={
-            "model": settings.llm_model,
-            "prompt_len": len(prompt),
-            "temperature": kwargs.get("temperature", 0.3),
-            "max_tokens": kwargs.get("max_tokens", 1024),
-        },
-    )
-
-    try:
-        response = await client.chat.completions.create(
-            model=settings.llm_model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=kwargs.get("temperature", 0.3),
-            max_tokens=kwargs.get("max_tokens", 1024),
+    def __init__(
+        self,
+        base_url: str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
+    ):
+        self._client = AsyncOpenAI(
+            base_url=base_url or settings.llm_base_url,
+            api_key=api_key or settings.llm_api_key,
         )
-        content = response.choices[0].message.content
-        if content is None:
-            logger.error(
-                "LLM returned empty response",
-                extra={"model": settings.llm_model},
-            )
-            raise ValueError("LLM returned an empty response (content is None)")
+        self._model = model or settings.llm_model
+        self._timeout = settings.llm_timeout
 
+    async def generate(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float = 0.3,
+        max_tokens: int = 2048,
+        **kwargs: Any,
+    ) -> str:
+        """Отправляет промпт в LLM и возвращает сгенерированный текст.
+
+        Параметры:
+            messages: список сообщений в формате OpenAI (role + content).
+            temperature: температура генерации.
+            max_tokens: максимальное число токенов в ответе.
+            **kwargs: дополнительные параметры для completions.create.
+
+        Возвращает:
+            Строка с ответом модели.
+
+        Исключения:
+            LLMConnectionError — при потере связи с сервером.
+            LLMTimeoutError — при превышении таймаута.
+            LLMResponseError — при пустом или некорректном ответе.
+        """
         logger.info(
-            "LLM response received",
-            extra={"model": settings.llm_model, "response_len": len(content)},
+            "Отправка запроса к LLM: model=%s, messages=%d, timeout=%.1f",
+            self._model,
+            len(messages),
+            self._timeout,
         )
-        return content.strip()
-    except Exception as e:
-        logger.error(
-            "LLM request failed",
-            extra={"error_type": type(e).__name__, "error_message": str(e)},
-            exc_info=e,
-        )
-        raise
+
+        try:
+            response = await self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=self._timeout,
+                **kwargs,
+            )
+
+        except APITimeoutError:
+            logger.exception(
+                "Превышен таймаут запроса к LLM (%.1f сек)", self._timeout
+            )
+            raise LLMTimeoutError(timeout=self._timeout)
+
+        except APIConnectionError:
+            logger.exception(
+                "Не удалось подключиться к LLM: %s", settings.llm_base_url
+            )
+            raise LLMConnectionError(base_url=settings.llm_base_url)
+
+        except Exception:
+            logger.exception("Неожиданная ошибка при вызове LLM")
+            raise
+
+        # --- Валидация ответа ---
+        try:
+            choice = response.choices[0]
+            content = choice.message.content
+
+            if content is None or not content.strip():
+                logger.warning("LLM вернул пустой ответ")
+                raise LLMResponseError("LLM вернул пустой ответ")
+
+            logger.info(
+                "LLM вернул ответ: %d символов",
+                len(content),
+            )
+            return content
+
+        except LLMResponseError:
+            raise
+        except Exception:
+            logger.exception("Ошибка при разборе ответа LLM")
+            raise LLMResponseError("Не удалось разобрать ответ модели")

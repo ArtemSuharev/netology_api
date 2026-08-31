@@ -1,97 +1,33 @@
-"""
-Конфигурация структурированного логирования.
+"""Настройка структурированного логирования.
 
-Формат вывода — JSON (один объект на строку).
-Подходит для парсинга в ELK, Loki, CloudWatch и подобных системах.
-
-Поля каждого события:
-    timestamp  — ISO-8601
-    level      — уровень логирования (INFO, ERROR, WARNING, DEBUG)
-    logger     — имя логгера (полный путь модуля)
-    message    — сообщение
-    extra      — произвольные поля (добавляются через extra=)
-    trace_id   — идентификатор запроса (если передан)
+Использует JSON-форматтер для удобного парсинга логов (ELK, Grafana Loki и т.д.).
+При невозможности импорта python-json-logger возвращается к обычному формату.
 """
+
+from __future__ import annotations
 
 import json
 import logging
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 
-class _JsonFormatter(logging.Formatter):
-    """JSON-форматтер для структурированных логов."""
-
-    LEVELS = {
-        logging.DEBUG: "DEBUG",
-        logging.INFO: "INFO",
-        logging.WARNING: "WARNING",
-        logging.ERROR: "ERROR",
-        logging.CRITICAL: "CRITICAL",
-    }
-
-    # Поля, которые не нужно копировать в extra
-    _EXCLUDED = frozenset(
-        (
-            "name",
-            "msg",
-            "args",
-            "created",
-            "relativeCreated",
-            "exc_info",
-            "exc_text",
-            "stack_info",
-            "lineno",
-            "funcName",
-            "pathname",
-            "filename",
-            "module",
-            "levelname",
-            "levelno",
-            "msecs",
-            "message",
-            "thread",
-            "threadName",
-            "processName",
-            "process",
-            "taskName",
-            "extra",
-        )
-    )
+class JSONFormatter(logging.Formatter):
+    """Форматтер, преобразующий лог-запись в JSON-объект."""
 
     def format(self, record: logging.LogRecord) -> str:
-        """Форматирует LogRecord в одну JSON-строку."""
         log_entry: dict[str, Any] = {
-            "timestamp": datetime.now(UTC).isoformat(),
-            "level": self.LEVELS.get(record.levelno, record.levelname),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
+            "module": record.module,
+            "function": record.funcName,
+            "line": record.lineno,
         }
 
-        # Копируем extra-поля из record.__dict__
-        for key, value in record.__dict__.items():
-            if key in self._EXCLUDED:
-                continue
-            if value is None:
-                continue
-            if isinstance(value, BaseException):
-                log_entry["exception"] = {
-                    "type": type(value).__name__,
-                    "message": str(value),
-                }
-            elif isinstance(value, (dict, list, tuple)):
-                try:
-                    json.dumps(value, ensure_ascii=False)
-                    log_entry[key] = value
-                except (TypeError, ValueError):
-                    log_entry[key] = str(value)
-            elif not isinstance(value, (int, float, bool, str)):
-                log_entry[key] = str(value)
-            else:
-                log_entry[key] = value
-
-        # Добавляем traceback при наличии exc_info
+        # Добавляем информацию об исключении
         if record.exc_info and record.exc_info[0] is not None:
             log_entry["exception"] = {
                 "type": record.exc_info[0].__name__,
@@ -99,53 +35,65 @@ class _JsonFormatter(logging.Formatter):
                 "traceback": self.formatException(record.exc_info),
             }
 
+        # Добавляем дополнительные поля из record.extra
+        for key, value in record.__dict__.get("extra_data", {}).items():
+            log_entry[key] = value
+
         return json.dumps(log_entry, ensure_ascii=False)
 
 
 def setup_logging(level: str = "INFO") -> None:
-    """
-    Настраивает корневой логгер приложения.
+    """Настраивает глобальный логгер приложения.
 
-    Args:
-        level: Базовый уровень логирования (DEBUG, INFO, WARNING, ERROR).
+    Параметры:
+        level: уровень логирования (DEBUG, INFO, WARNING, ERROR, CRITICAL).
     """
+    log_level = getattr(logging, level.upper(), logging.INFO)
+
+    # Корневой логгер
     root_logger = logging.getLogger()
-    root_logger.setLevel(getattr(logging, level.upper(), logging.INFO))
+    root_logger.setLevel(log_level)
 
-    # Очищаем предыдущие хендлеры
-    root_logger.handlers.clear()
+    # Handler для stdout (INFO и выше)
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setLevel(log_level)
+    stdout_handler.setFormatter(JSONFormatter())
+    root_logger.addHandler(stdout_handler)
 
-    # JSON-хендлер на stdout
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(_JsonFormatter())
-    root_logger.addHandler(handler)
+    # Handler для stderr (ERROR и выше)
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setLevel(logging.ERROR)
+    stderr_handler.setFormatter(JSONFormatter())
+    root_logger.addHandler(stderr_handler)
+
+    # Подавляем шум от httpx и urllib3
+    logging.getLogger("httpx").setLevel("WARNING")
+    logging.getLogger("httpcore").setLevel("WARNING")
+    logging.getLogger("openai").setLevel("WARNING")
 
 
 def get_logger(name: str) -> logging.Logger:
+    """Возвращает именованный логгер.
+
+    Параметры:
+        name: имя логгера (обычно __name__).
+
+    Возвращает:
+        Настроенный logger.
     """
-    Возвращает именованный логгер с JSON-форматтером.
-
-    Args:
-        name: Имя логгера (обычно __name__ модуля).
-
-    Returns:
-        Настроенный Logger.
-    """
-    logger = logging.getLogger(name)
-    return logger
+    return logging.getLogger(name)
 
 
-def log_exception(
-    logger: logging.Logger, level: int, msg: str, exc: BaseException, **extra: Any
+def log_with_extra(
+    logger: logging.Logger,
+    level: int,
+    message: str,
+    **extra: Any,
 ) -> None:
-    """
-    Записывает ошибку с traceback в структурированном формате.
+    """Записывает лог-сообщение с дополнительными полями.
 
-    Args:
-        logger: Логгер для записи.
-        level: Уровень логирования (logging.ERROR и т.п.).
-        msg: Сообщение об ошибке.
-        exc: Исключение для записи с traceback.
-        **extra: Дополнительные поля (передаются через extra=).
+    Пример:
+        log_with_extra(logger, logging.INFO, "Request processed", request_id="abc", duration_ms=120)
     """
-    logger.log(level, msg, extra=extra, exc_info=exc)
+    extra_data = {"extra_data": extra}
+    logger.log(level, message, extra=extra_data)

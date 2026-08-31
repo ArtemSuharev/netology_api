@@ -1,10 +1,22 @@
-LENGTH_INSTRUCTIONS = {
-    "short": "Сделай краткое резюме в 1-2 предложениях.",
-    "medium": "Составь среднее резюме в 3-5 предложений.",
-    "long": "Подготовь развёрнутое резюме ключевых идей (до 7 предложений).",
-}
+"""Формирование промптов для LLM."""
+
+SUMMARIZATION_SYSTEM_PROMPT = (
+    "Ты — помощник для суммаризации текста. "
+    "Твоя задача — кратко и точно передавать основной смысл текста, "
+    "сохраняя ключевые факты и идеи. "
+    "Отвечай только результатом суммаризации, без лишних комментариев."
+)
+
+SUMMARIZATION_USER_PROMPT = (
+    "Прошу пройтись по тексту и выделить самое важное, "
+    "сохранив ключевые моменты. "
+    "Вот текст:\n\n{text}"
+)
 
 
-def build_summarize_prompt(text: str, length: str = "medium") -> str:
-    instruction = LENGTH_INSTRUCTIONS.get(length, LENGTH_INSTRUCTIONS["medium"])
-    return f"{instruction}\n\nТекст для суммаризации:\n---\n{text}\n---"
+def build_summarization_prompt(text: str) -> list[dict[str, str]]:
+    """Собирает системный и пользовательский промпты для суммаризации."""
+    return [
+        {"role": "system", "content": SUMMARIZATION_SYSTEM_PROMPT},
+        {"role": "user", "content": SUMMARIZATION_USER_PROMPT.format(text=text)},
+    ]

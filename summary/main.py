@@ -1,92 +1,124 @@
+"""Точка входа — FastAPI приложение.
+
+Настройка: логирование, middleware, обработчики исключений.
+"""
+
+from __future__ import annotations
+
 import logging
 import time
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from api.routes import router as routes_router
+from api.routes import router as api_router
 from config.settings import settings
+from exceptions import APIError, ProcessingError
 from logging_config import setup_logging
 
-# Настраиваем логирование на основе переменной окружения
-setup_logging(settings.log_level)
+# Настраиваем логирование при старте
+setup_logging(level=settings.log_level)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="Summary API",
-    version="0.1.0",
-    description="FastAPI-сервис для суммаризации текста через LLM",
+    title="Summary Service",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
 )
-app.include_router(routes_router)
+
+app.include_router(api_router, prefix="/api")
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Логирование при запуске приложения."""
-    logger.info(
-        "Application startup",
-        extra={
-            "env": settings.env,
-            "host": settings.server_host,
-            "port": settings.server_port,
-            "fallback_enabled": settings.fallback_enabled,
-        },
-    )
+# ======================== Middleware ========================
 
 
 @app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """
-    Middleware: логирование каждого HTTP-запроса.
+async def log_requests(request: Request, call_next) -> JSONResponse:
+    """Middleware: логирует каждый HTTP-запрос и ответ."""
+    request_id = request.headers.get("X-Request-ID", "N/A")
+    start_time = time.perf_counter()
 
-    Записывает:
-    - Приём запроса (method, path, client IP)
-    - Ответ (status_code, длительность)
-    - Ошибки (traceback, детали)
-    """
-    request_id = request.headers.get("X-Request-ID", "no-id")
-    start_time = time.time()
-
-    # Создаём logger с trace_id через extra
-    req_logger = logging.getLogger("api.request")
-
-    req_logger.info(
-        "Request started",
+    logger.info(
+        "[{request_id}] {method} {path}",
         extra={
-            "method": request.method,
-            "path": request.url.path,
-            "client_host": request.client.host if request.client else None,
-            "trace_id": request_id,
+            "extra_data": {
+                "request_id": request_id,
+                "method": request.method,
+                "path": request.url.path,
+            }
         },
     )
 
-    try:
-        response = await call_next(request)
-        process_time = time.time() - start_time
+    response = await call_next(request)
 
-        req_logger.info(
-            "Request completed",
-            extra={
-                "status_code": response.status_code,
-                "duration_ms": round(process_time * 1000, 2),
-                "trace_id": request_id,
-            },
-        )
-        return response
-    except Exception as exc:
-        process_time = time.time() - start_time
+    duration = time.perf_counter() - start_time
+    logger.info(
+        "[{request_id}] {method} {path} → {status} ({duration_ms:.0f}ms)",
+        extra={
+            "extra_data": {
+                "request_id": request_id,
+                "method": request.method,
+                "path": request.url.path,
+                "status": response.status_code,
+                "duration_ms": duration * 1000,
+            }
+        },
+    )
 
-        req_logger.error(
-            "Request failed",
-            extra={
-                "status_code": 500,
-                "duration_ms": round(process_time * 1000, 2),
-                "trace_id": request_id,
-            },
-            exc_info=exc,
-        )
+    return response
 
-        return JSONResponse(
-            status_code=500,
-            content={"detail": {"code": "INTERNAL_ERROR", "message": "Internal server error"}},
-        )
+
+# ======================== Exception Handlers ========================
+
+
+@app.exception_handler(APIError)
+async def api_error_handler(request: Request, exc: APIError) -> JSONResponse:
+    """Обрабатывает API-ошибки (валидация, входные данные)."""
+    logger.warning(
+        "API-ошибка: status={status}, detail={detail}",
+        extra={"extra_data": {"status": exc.status_code, "detail": exc.detail}},
+    )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+    )
+
+
+@app.exception_handler(ProcessingError)
+async def processing_error_handler(
+    request: Request, exc: ProcessingError
+) -> JSONResponse:
+    """Обрабатывает ошибки обработки (пост-обработка, конвейер)."""
+    logger.error(
+        "Ошибка обработки: {detail}",
+        extra={"extra_data": {"detail": exc.detail}},
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": exc.detail},
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_error_handler(
+    request: Request, exc: Exception
+) -> JSONResponse:
+    """Перехватывает все необработанные исключения."""
+    logger.exception(
+        "Необработанная ошибка: {error}",
+        extra={"extra_data": {"error": str(exc)}},
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Внутренняя ошибка сервера"},
+    )
+
+
+# ======================== Health Check ========================
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    """Проверка работоспособности сервиса."""
+    return {"status": "ok"}

@@ -1,13 +1,136 @@
-# Summary API
+# Summary Service
 
-FastAPI-сервис для суммаризации текста через LLM.
+Сервис суммаризации текста на базе LLM (совместим с OpenAI API).
+
+## Архитектура
+
+```
+HTTP-запрос ──→ api/routes.py          (валидация, маршрутизация)
+                    │
+                    ▼
+          services/pipeline.py         (бизнес-логика: промпт → LLM → пост-обработка)
+                    │
+                    ├──→ llm/prompts.py     (системный + пользовательский промпт)
+                    ├──→ llm/client.py      (вызов LLM с таймаутами и обработкой ошибок)
+                    └──→ llm/postprocess.py (очистка и форматирование ответа)
+```
+
+## Слой API
+
+| Метод     | Путь               | Описание                  |
+|-----------|--------------------|---------------------------|
+| `GET`     | `/health`          | Проверка работоспособности |
+| `POST`    | `/api/summarize`   | Суммаризация текста        |
+
+### Входные данные
+
+```json
+{
+  "text": "Полный текст для суммаризации..."
+}
+```
+
+Ограничения:
+- `text` — обязательное поле, не может быть пустым или состоять только из пробелов
+- Максимальная длина: `MAX_TEXT_LENGTH` (по умолчанию 50 000 символов)
+
+### Выходные данные
+
+```json
+{
+  "summary": "Краткое содержание...",
+  "input_length": 1234,
+  "output_length": 56,
+  "request_id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+### Обработка ошибок
+
+| Код | Случай | Исключение |
+|-----|--------|------------|
+| 400 | Текст превышает лимит длины | `TextTooLongError` |
+| 422 | Валидация не прошла (пустой текст, отсутствие поля) | Pydantic `ValidationError` |
+| 500 | Ошибка LLM (сеть/таймаут) + fallback отключён | `LLMConnectionError` / `LLMTimeoutError` |
+| 500 | Ошибка пост-обработки | `ProcessingError` |
+| 500 | Внутренняя ошибка сервера | — (Unhandled) |
+
+При недоступности LLM сервис возвращает **fallback-ответ** (настраивается через `FALLBACK_ENABLED` / `FALLBACK_SUMMARY`).
+
+## Слой бизнес-логики (Pipeline)
+
+Конвейер выполняет три шага:
+
+1. **build_summarization_prompt** — формирует системный и пользовательский промпты
+2. **llm.generate** — отправляет запрос к модели с таймаутом
+3. **post_process** — очищает ответ (убирает артефакты, Markdown-блоки, кавычки)
+
+**Fallback-механизм:** при `LLMConnectionError` или `LLMTimeoutError` автоматически возвращается `FALLBACK_SUMMARY` (если `FALLBACK_ENABLED=true`).
+
+## Слой LLM
+
+- Клиент использует `AsyncOpenAI` — совместим с Ollama, vllm, LM Studio, OpenAI и любыми прокси с OpenAI-совместимым API.
+- Таймаут настраивается через `LLM_TIMEOUT` (по умолчанию 60 сек).
+- Обрабатываются: `APIConnectionError`, `APITimeoutError`, пустые ответы.
+
+## Иерархия исключений
+
+```
+Exception
+├── APIError                          # Ошибки API-слоя (4xx)
+│   ├── TextTooLongError              # Текст слишком длинный (400)
+│   └── ...
+├── LLMError                          # Ошибки LLM-слоя (5xx, retryable)
+│   ├── LLMConnectionError            # Потеря связи (503)
+│   ├── LLMTimeoutError               # Превышен таймаут (504)
+│   └── LLMResponseError              # Некорректный ответ (500, не retryable)
+└── ProcessingError                   # Ошибки обработки (5xx)
+    └── EmptyResponseError            # Пустой результат
+```
+
+## Логирование
+
+Сервис использует **структурированное JSON-логирование** — каждый лог — валидный JSON-объект, удобный для парсинга ELK, Grafana Loki и аналогичными системами.
+
+### Уровни логов
+
+| Уровень | Когда записывается |
+|---------|-------------------|
+| DEBUG | Детали формирования промпта |
+| INFO | Запрос получен, запрос к LLM отправлен, ответ получен, запрос обработан |
+| WARNING | LLM недоступен (fallback), пустой ответ модели |
+| ERROR | Ошибка обработки, ошибка пост-обработки |
+| CRITICAL | Необработанные исключения |
+
+### Пример JSON-лога
+
+```json
+{
+  "timestamp": "2026-08-31T13:00:00+00:00",
+  "level": "INFO",
+  "logger": "api.routes",
+  "message": "[550e8400] Получен запрос на суммаризацию, длина=1234",
+  "module": "routes",
+  "function": "summarize",
+  "line": 45,
+  "request_id": "550e8400",
+  "text_length": 1234
+}
+```
+
+### Настройка
+
+```
+LOG_LEVEL=info          # DEBUG, INFO, WARNING, ERROR
+```
 
 ## Установка
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env
-# Заполните .env своими ключами
+cp .env.example .env               # и заполни .env
 ```
 
 ## Запуск
@@ -16,150 +139,24 @@ cp .env.example .env
 uvicorn main:app --reload
 ```
 
-API доступен по адресу `http://localhost:8000`.
+Сервер запустится на `http://0.0.0.0:8000`.
 
-## API
+Документация Swagger: `http://localhost:8000/docs`
 
-### POST /summarize
-
-Суммаризация текста.
-
-**Body:**
-```json
-{
-  "text": "Текст для суммаризации",
-  "length": "short"
-}
-```
-
-**length:** `short` | `medium` (по умолчанию) | `long`
-
-**Response:**
-```json
-{
-  "summary": "Краткое содержание текста...",
-  "fallback_used": false
-}
-```
-
-`fallback_used` — `true`, если LLM был недоступен и использовался правило-based fallback.
-
-### GET /health
-
-Проверка статуса сервиса.
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "fallback_enabled": true
-}
-```
-
-## Обработка ошибок
-
-| Статус | Код ошибки | Описание |
-|--------|-----------|----------|
-| 400 | `EMPTY_TEXT` | Текст пустой |
-| 400 | `TEXT_TOO_SHORT` | Текст короче минимума |
-| 400 | `TEXT_TOO_LONG` | Текст превышает 50 000 символов |
-| 400 | `INVALID_LENGTH` | Неверное значение `length` |
-| 503 | `SERVICE_UNAVAILABLE` | LLM недоступен, fallback отключён |
-| 500 | `INTERNAL_ERROR` | Неожиданная ошибка |
-
-### Fallback
-
-При недоступности LLM (сетевые ошибки, таймауты, исчерпание retry) сервис автоматически переключается на **rule-based fallback** — извлечение ключевых предложений из исходного текста.
-
-Управление fallback:
-- `.env`: `FALLBACK_ENABLED=true` (по умолчанию)
-- Отключение: `FALLBACK_ENABLED=false` → при недоступности LLM вернётся 503
-
-## Архитектура
-
-```
-summary/
-├── main.py                    # API-слой (FastAPI)
-├── api/
-│   └── routes.py              # Маршруты, модели запросов/ответов
-├── llm/
-│   ├── prompts.py             # Формирование промпта
-│   └── client.py              # Вызов модели + retry
-├── services/
-│   ├── pipeline.py            # Бизнес-логика, оркестрация
-│   ├── fallback.py            # Fallback-суммаризатор
-│   └── postprocessing.py      # Пост-обработка ответа
-├── config/
-│   └── settings.py            # Конфигурация
-```
-
-## Логирование
-
-Сервис использует **структурированное JSON-логирование** (один JSON-объект на строку).
-Подходит для ELK Stack, Grafana Loki, CloudWatch Logs.
-
-### Пример вывода
-
-```json
-{
-  "timestamp": "2026-08-31T06:22:48.367106+00:00",
-  "level": "INFO",
-  "logger": "services.pipeline",
-  "message": "Prompt built",
-  "prompt_len": 512,
-  "text_len": 2048,
-  "length": "medium",
-  "trace_id": "abc-123"
-}
-```
-
-### Уровни логирования
-
-| Уровень | Что логируется |
-|---------|---------------|
-| DEBUG   | Параметры вызова LLM (модель, температура, max_tokens) |
-| INFO    | Приём запроса, формирование промпта, ответ модели, завершение пайплайна |
-| WARNING | Валидация не прошла (пустой текст, слишком короткий/длинный, неверный length) |
-| ERROR   | Ошибки LLM (с traceback), fallback-переключение, критические ошибки |
-
-### Поля в логах
-
-| Поле | Описание |
-|------|----------|
-| `timestamp` | ISO-8601 (UTC) |
-| `level` | Уровень логирования |
-| `logger` | Имя модуля |
-| `message` | Сообщение |
-| `trace_id` | Идентификатор запроса (из `X-Request-ID` или `no-id`) |
-| `exception` | Объект с `type`, `message`, `traceback` |
-
-### Настройка уровня
-
-Через переменную окружения или аргумент в `main.py`:
-```python
-setup_logging("DEBUG")  # DEBUG, INFO, WARNING, ERROR
-```
-
-## CI/CD
-
-Пайплайн GitHub Actions (`.github/workflows/ci.yml`) запускает 4 job:
-
-| Job | Что делает |
-|-----|-----------|
-| `lint` | `ruff check` + `ruff format --check` |
-| `test` | `pytest` с покрытием (`--cov`) |
-| `build` | `python -m build` + проверка установки wheel |
-| `deps` | Проверка что все импорты работают |
+## Пример запроса
 
 ```bash
-# Запуск локально
-pip install ruff pytest pytest-cov
-ruff check . && ruff format --check .
-pytest -v
+curl -X POST http://localhost:8000/api/summarize \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Длинный текст для суммаризации..."}'
 ```
 
 ## Тесты
 
 ```bash
-pytest
+pytest tests/ -v
 ```
+
+## CI
+
+Пайплайн GitHub Actions запускает тесты на Python 3.11 и 3.12 при каждом push/PR в ветку `main`.
