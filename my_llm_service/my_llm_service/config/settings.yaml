@@ -1,0 +1,14 @@
+llm:
+  provider: yandex
+  model: yandexgpt-lite
+  temperature: 0.7
+  max_tokens: 1024
+  folder_id: b1gvu3hqneggfc5lbq1s
+  iam_token_env: YANDEX_IAM_TOKEN
+
+cache:
+  ttl: 600
+
+server:
+  host: 0.0.0.0
+  port: 8000
