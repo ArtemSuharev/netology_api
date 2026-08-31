@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHONDEFAULTENCODING: utf-8
+
+jobs:
+  # ─── 1. Линтинг ──────────────────────────────────────────────
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Run ruff (lint + format check)
+        run: |
+          ruff check .
+          ruff format --check .
+
+  # ─── 2. Тесты ────────────────────────────────────────────────
+  test:
+    name: Tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run tests with coverage
+        run: |
+          pytest --cov=. --cov-report=term-missing --cov-report=xml -v
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
+          fail_ci_if_error: false
+
+  # ─── 3. Сборка / проверка установки ──────────────────────────
+  build:
+    name: Build & install check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package in isolated environment
+        run: |
+          pip install build
+          python -m build --sdist --wheel --outdir dist/ .
+
+      - name: Verify wheel installation
+        run: |
+          pip install dist/*.whl
+          python -c "from main import app; print('Import OK')"
+
+  # ─── 4. Проверка зависимостей ────────────────────────────────
+  deps:
+    name: Dependency check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install requirements
+        run: pip install -r requirements.txt
+
+      - name: Verify all imports work
+        run: |
+          python -c "
+          from main import app
+          from api.routes import router
+          from services.pipeline import summarize_text, SummaryResult
+          from services.fallback import fallback_summarize
+          from services.postprocessing import postprocess
+          from llm.client import generate
+          from llm.prompts import build_summarize_prompt
+          from config.settings import settings
+          from utils.logging import setup_logging
+          print('All imports OK')
+          "

@@ -1,0 +1,57 @@
+[project]
+name = "summary-api"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.5.0",
+    "openai>=1.43.0",
+    "tenacity>=8.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.8.0",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 99
+src = ["."]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "B904",  # raise from None — intentionally used for clean error propagation
+    "SIM117", # nested with — clearer for patch stacking
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["api", "config", "llm", "services", "utils"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]
+log_cli = false
+log_cli_level = "WARNING"
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
